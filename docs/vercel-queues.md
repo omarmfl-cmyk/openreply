@@ -9,6 +9,17 @@ Signed Meta and Zernio webhooks publish typed messages using the official
 Comments, inbound messages, postbacks, rate-limit requeues, read fallbacks, and
 appreciation follow-ups retain their payloads and provider routing.
 
+The installed `@vercel/queue` 0.6.0 accepts repeated idempotency keys; the service
+deduplicates delivery out-of-band. The publisher therefore returns `send()`
+directly, without a duplicate-error catch. The SDK returns the server-assigned
+`messageId` on normal acceptance (do not assume it is the original message ID),
+or `null` on HTTP 202 deferred acceptance. A publish-time HTTP 409 throws a generic
+`Error` and must propagate; consumer-side 409 handling does not apply to publishing.
+Neither `DuplicateMessageError` nor a base `QueueError` is exported by 0.6.0.
+This is verified against the installed declarations and implementation, with HTTP
+boundary tests in `__tests__/vercel-queue-sdk.test.ts`; these do not publish to the
+live service. See the [SendMessage API](https://vercel.com/docs/queues/api#idempotency).
+
 Neon retains campaigns, accounts, auth, tracking, usage reservations, DM logs,
 delivery receipts, and reconciliation checkpoints. Redis Cloud remains for rate
 limiting, operational alerts, and short reconciliation leases/deployment ownership.
@@ -143,7 +154,6 @@ References: [official SDK](https://vercel.com/docs/queues/sdk),
 
 ## Files changed in this migration
 
-- `.env.example`
 - `.github/workflows/ci.yml`
 - `Dockerfile`
 - `README.md`
