@@ -16,8 +16,8 @@
  * handled comments. Each sweep is capped so it can never flood the comment API
  * (which Instagram rate-limits aggressively, error 368).
  *
- * It runs on an interval in the worker process because Vercel's free crons only
- * fire once a day. Matching and sending reuse the worker's processComment, so
+ * A self-rescheduling Vercel Queue message runs this sweep.
+ * Matching and sending reuse the DM processor's processComment, so
  * rate limiting and logging behave exactly as for webhook-delivered comments.
  *
  * Known limitation, handled not fixed: comments removed by Instagram's Hidden
@@ -26,7 +26,7 @@
  */
 
 import { prisma } from "@/lib/db/client";
-import { getDMQueue } from "@/lib/queue/client";
+import { sendDmJob } from "@/lib/queue/client";
 import {
   getRecentMediaComments,
   getUserMedia,
@@ -187,7 +187,7 @@ async function sweepCampaign({
   }
   if (mediaIds.length === 0) return stat;
 
-  const queue = getDMQueue();
+
 
   for (const mediaId of mediaIds) {
     let comments: InstagramComment[];
@@ -260,7 +260,7 @@ async function sweepCampaign({
       // drop this add, so the comment would never be retried. Dedup is handled
       // above (owner-reply + DmLog guards) and the worker is idempotent
       // (publicReplySentAt / SENT), so re-processing a comment is safe.
-      await queue.add("process-comment", {
+      await sendDmJob("process-comment", {
         instagramAccountId: account.instagramId,
         accountConnectionId: account.id,
         commentId: c.id,

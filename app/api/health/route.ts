@@ -1,11 +1,11 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db/client";
-import { getDMQueue, getRedisConnection } from "@/lib/queue/client";
+import { getRedisConnection } from "@/lib/ops/redis";
 import { getWorkerHealth } from "@/lib/ops/worker-health";
 
 export const runtime = "nodejs";
-// Health must reflect live state (worker heartbeat, queue depth), never a
-// cached response, or it reports stale worker start times.
+// Database and Redis checks must remain live. Queue status describes execution mode,
+// not an invented backlog or heartbeat for an idle push consumer.
 export const dynamic = "force-dynamic";
 
 type CheckStatus = "ok" | "error";
@@ -39,21 +39,12 @@ async function checkRedis(): Promise<HealthCheck> {
   }
 }
 
-async function checkQueue(): Promise<HealthCheck & { counts?: unknown }> {
-  try {
-    const counts = await getDMQueue().getJobCounts(
-      "waiting",
-      "active",
-      "delayed",
-      "failed"
-    );
-    return { status: "ok", counts };
-  } catch (error) {
-    return {
-      status: "error",
-      detail: error instanceof Error ? error.message : "Queue check failed",
-    };
-  }
+async function checkQueue() {
+  return {
+    status: "ok" as const, mode: "vercel-queue-push", topic: "dm-processing",
+    statusBasis: "configuration", deliveryVerified: false,
+    detail: "No resident worker required. Verify deliveries in Vercel Queues observability.",
+  };
 }
 
 export async function GET() {

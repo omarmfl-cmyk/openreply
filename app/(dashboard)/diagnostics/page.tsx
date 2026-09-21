@@ -5,9 +5,10 @@ import { useEffect, useState } from "react";
 import StatusBadge from "@/components/status-badge";
 
 interface DiagnosticsData {
-  queueCounts: Record<string, number>;
+  queueCounts: Record<string, number | null>;
   workerHealth: {
     healthy: boolean;
+    mode?: string;
     ageMs: number | null;
     heartbeat: {
       checkedAt: string;
@@ -153,7 +154,9 @@ export default function DiagnosticsPage() {
             {data?.workerHealth.healthy ? t("Healthy") : t("Needs attention")}
           </p>
           <p className="mt-2 text-xs text-muted">
-            {workerAgeSeconds == null
+            {data?.workerHealth.mode === "vercel-queue-push"
+              ? "Vercel Queues · push delivery"
+              : workerAgeSeconds == null
               ? t("No heartbeat found")
               : t("Last heartbeat {seconds}s ago", { seconds: workerAgeSeconds })}
           </p>
@@ -164,7 +167,7 @@ export default function DiagnosticsPage() {
               {t("Queue")} {label(key)}
             </p>
             <p className="mt-3 text-2xl font-bold text-foreground">
-              {data?.queueCounts[key] ?? 0}
+              {data?.queueCounts[key] ?? "—"}
             </p>
           </div>
         ))}

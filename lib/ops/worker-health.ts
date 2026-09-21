@@ -1,8 +1,6 @@
-import { getRedisConnection } from "@/lib/queue/client";
+import { getRedisConnection } from "@/lib/ops/redis";
 
-const WORKER_HEALTH_KEY = "health:worker:dm";
 const WORKER_ALERTS_KEY = "alerts:worker:dm";
-const WORKER_HEARTBEAT_TTL_SECONDS = 120;
 
 export interface WorkerHeartbeat {
   status: "running";
@@ -14,6 +12,9 @@ export interface WorkerHeartbeat {
 }
 
 export interface WorkerHealth {
+  mode: "vercel-queue-push";
+  heartbeatRequired: false;
+  detail: string;
   healthy: boolean;
   heartbeat: WorkerHeartbeat | null;
   ageMs: number | null;
@@ -37,38 +38,11 @@ function parseJson<T>(value: string | null): T | null {
   }
 }
 
-export async function recordWorkerHeartbeat(
-  heartbeat: Omit<WorkerHeartbeat, "checkedAt" | "status" | "worker">
-) {
-  const payload: WorkerHeartbeat = {
-    ...heartbeat,
-    status: "running",
-    worker: "dm",
-    checkedAt: new Date().toISOString(),
-  };
-
-  await getRedisConnection().set(
-    WORKER_HEALTH_KEY,
-    JSON.stringify(payload),
-    "EX",
-    WORKER_HEARTBEAT_TTL_SECONDS
-  );
-}
-
 export async function getWorkerHealth(): Promise<WorkerHealth> {
-  const heartbeat = parseJson<WorkerHeartbeat>(
-    await getRedisConnection().get(WORKER_HEALTH_KEY)
-  );
-
-  if (!heartbeat) {
-    return { healthy: false, heartbeat: null, ageMs: null };
-  }
-
-  const ageMs = Date.now() - new Date(heartbeat.checkedAt).getTime();
   return {
-    healthy: ageMs <= WORKER_HEARTBEAT_TTL_SECONDS * 1000,
-    heartbeat,
-    ageMs,
+    healthy: true, heartbeat: null, ageMs: null,
+    mode: "vercel-queue-push", heartbeatRequired: false,
+    detail: "Managed push callbacks; delivery health and backlog are available in Vercel Queues observability.",
   };
 }
 

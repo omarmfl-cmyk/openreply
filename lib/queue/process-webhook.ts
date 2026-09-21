@@ -1,5 +1,5 @@
 import { prisma } from '@/lib/db/client';
-import { getDMQueue, MESSAGE_JOB_NAME, POSTBACK_JOB_NAME } from '@/lib/queue/client';
+import { sendDmJob, MESSAGE_JOB_NAME, POSTBACK_JOB_NAME } from '@/lib/queue/client';
 import { parseCommentEvents, parseMessageEvents, parsePostbackEvents, parseReadEvents } from '@/lib/meta/webhook';
 import { Prisma, type InstagramProvider } from '@/app/generated/prisma/client';
 
@@ -34,13 +34,13 @@ export async function processInstagramWebhook({ payload: incoming, provider, wor
     const commentEvents = parseCommentEvents(
       payload as Parameters<typeof parseCommentEvents>[0]
     );
-    const queue = getDMQueue();
+
 
     for (const event of commentEvents) {
       const account = accountMap.get(event.instagramAccountId);
       if (!account) continue;
 
-      await queue.add(
+      await sendDmJob(
         "process-comment",
         {
           instagramAccountId: event.instagramAccountId,
@@ -54,7 +54,7 @@ export async function processInstagramWebhook({ payload: incoming, provider, wor
           source: "WEBHOOK",
         },
         {
-          jobId: `comment_${event.instagramAccountId}_${event.commentId}`,
+          idempotencyKey: `comment_${event.instagramAccountId}_${event.commentId}`,
         }
       );
 
@@ -72,7 +72,7 @@ export async function processInstagramWebhook({ payload: incoming, provider, wor
     );
 
     for (const event of postbackEvents) {
-      await queue.add(
+      await sendDmJob(
         POSTBACK_JOB_NAME,
         {
           instagramAccountId: event.instagramAccountId,
@@ -82,9 +82,8 @@ export async function processInstagramWebhook({ payload: incoming, provider, wor
           mid: event.mid,
         },
         {
-          // BullMQ forbids ":" in custom job ids, and the payload is
-          // "reveal:<id>", so build with underscores and strip any colons.
-          jobId: `postback_${event.instagramAccountId}_${event.userId}_${(
+          // Preserve the existing event identity across the queue migration.
+          idempotencyKey: `postback_${event.instagramAccountId}_${event.userId}_${(
             event.mid ?? event.payload
           ).replace(/:/g, "_")}`,
         }
@@ -100,7 +99,7 @@ export async function processInstagramWebhook({ payload: incoming, provider, wor
       const account = accountMap.get(event.instagramAccountId);
       if (!account) continue;
 
-      await queue.add(
+      await sendDmJob(
         MESSAGE_JOB_NAME,
         {
           instagramAccountId: event.instagramAccountId,
@@ -110,11 +109,8 @@ export async function processInstagramWebhook({ payload: incoming, provider, wor
           senderId: event.senderId,
         },
         {
-          // Message ids can contain characters BullMQ rejects in a job id (":"
-          // in particular). base64url encodes into exactly the allowed alphabet
-          // and stays injective — substituting invalid characters would let two
-          // distinct mids collapse onto one job id, silently dropping a reply.
-          jobId: `message_${event.instagramAccountId}_${Buffer.from(
+          // Preserve injective event identities across queue redeliveries.
+          idempotencyKey: `message_${event.instagramAccountId}_${Buffer.from(
             event.messageId
           ).toString("base64url")}`,
         }
@@ -163,7 +159,7 @@ export async function processInstagramWebhook({ payload: incoming, provider, wor
         if (scheduledAutomationIds.has(automation.id)) continue;
         scheduledAutomationIds.add(automation.id);
 
-        await queue.add(
+        await sendDmJob(
           POSTBACK_JOB_NAME,
           {
             instagramAccountId: event.instagramAccountId,
@@ -173,8 +169,8 @@ export async function processInstagramWebhook({ payload: incoming, provider, wor
             fallback: true,
           },
           {
-            delay: OPENING_DM_READ_FALLBACK_DELAY_MS,
-            jobId: `read_fallback_${event.instagramAccountId}_${event.userId}_${automation.id}`,
+            delaySeconds: OPENING_DM_READ_FALLBACK_DELAY_MS / 1000,
+            idempotencyKey: `read_fallback_${event.instagramAccountId}_${event.userId}_${automation.id}`,
           }
         );
       }

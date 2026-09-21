@@ -20,7 +20,7 @@ OpenReply is free, MIT-licensed software running on your own infrastructure, wit
 >
 > [openreply.diwen.dev](https://openreply.diwen.dev) is a demo of the dashboard, not a service you can sign up for. Creating an account there will never send a DM for you, and there is no hosted plan to upgrade to.
 >
-> A working instance needs your deployed fork, a public HTTPS URL, PostgreSQL, Redis, a running worker, and an Instagram connection. Choose optional paid Zernio or your own Meta app. [docs/setup.md](docs/setup.md) walks through all of it.
+> A working instance needs your deployed fork, a public HTTPS URL, PostgreSQL, Redis, Vercel Queues, and an Instagram connection. Choose optional paid Zernio or your own Meta app. [docs/setup.md](docs/setup.md) walks through all of it.
 
 > If this saves you a subscription or a weekend of building, a star on the repo genuinely helps other people find it.
 
@@ -54,21 +54,21 @@ OpenReply is built around Meta's official Instagram private replies. It does not
 2. Your connection provider (direct Meta or Zernio) delivers the event to your OpenReply instance.
 3. OpenReply checks the text against your active campaigns.
 4. On a keyword match, it queues a job.
-5. A background worker sends the private reply, and the public reply if you enabled one.
+5. A Vercel Queue callback sends the private reply, and the public reply if you enabled one.
 
-The web app receives the webhook and serves the dashboard. A separate worker process does the sending, because the send has to survive rate limits and retries. Both talk to the same Postgres and Redis.
+The web app publishes to the `dm-processing` Vercel Queue topic. Vercel invokes the DM callback on demand, including delayed follow-ups and reconciliation. PostgreSQL stores delivery records; Redis handles rate limiting and coordination. No always-on worker is required.
 
 ## Quick start
 
 1. **Choose your Instagram connection.** [Zernio](docs/zernio.md) is recommended if you want to avoid setting up your own Meta app. It is a paid service and sponsor, not a hosted OpenReply plan. Or follow the existing [direct Meta setup](docs/setup.md#the-meta-app).
-2. **Deploy the app and worker.** Both paths need PostgreSQL, Redis, a public HTTPS URL, and email delivery for magic-link sign-in.
+2. **Deploy the app on Vercel.** Both paths need PostgreSQL, Redis, a public HTTPS URL, and email delivery for magic-link sign-in.
 3. **Connect an Instagram Business or Creator account** in Settings, create a campaign, and test a keyword comment from another account.
 
 Read [docs/setup.md](docs/setup.md) for the complete walkthrough, including a provider-aware AI assistant prompt. Existing accounts are never automatically migrated. Check [Zernio’s feature limits](docs/zernio.md#feature-availability) before choosing.
 
 ### Deploy the web app
 
-The button creates your web deployment. You still need to configure the database, Redis, email delivery, and a separate always-on worker.
+The button creates your web deployment. You still need to configure the database, Redis, email delivery, and seed the reconciliation loop. See [Vercel Queues deployment](docs/vercel-queues.md).
 
 [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/diwenne/openreply)
 
@@ -83,10 +83,9 @@ docker-compose up -d      # starts Postgres and Redis
 npm run db:generate
 npm run db:migrate
 npm run dev               # web app on http://localhost:3000
-npm run worker            # in a second terminal, this sends the DMs
 ```
 
-Two processes, always. `npm run dev` serves the app and receives webhooks. `npm run worker` is what actually sends the messages. If comments come in and no DM ever arrives, the worker is the first thing to check.
+Queue development requires a linked Vercel project. Follow [queue setup and testing](docs/vercel-queues.md); `npm run worker` is no longer used.
 
 Full environment variables and the production layout are in [docs/setup.md](docs/setup.md).
 
@@ -98,12 +97,12 @@ If you use Claude Code, Cursor, or a similar tool, an assistant can walk you thr
 
 - Next.js 16 and React 19 for the web app and API routes
 - Prisma 7 with PostgreSQL
-- BullMQ on Redis for the send queue and the worker
+- Official `@vercel/queue` for push delivery; Redis for rate limiting
 - Auth.js (NextAuth) with email magic links through Resend
 - Tailwind CSS for the interface
 - The official Instagram API with Instagram Login
 
-For the complete stack — application libraries, the two runtime processes, and the free services this runs on (Vercel, Neon, Redis Cloud, an Oracle Cloud always-free VM for the worker, Resend, Meta) — see [docs/stack.md](docs/stack.md).
+See [the stack](docs/stack.md) and [queue migration/deployment steps](docs/vercel-queues.md).
 
 ## Contributing
 

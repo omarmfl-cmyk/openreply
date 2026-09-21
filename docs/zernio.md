@@ -6,8 +6,8 @@ Zernio is an **optional paid connection provider and sponsor of OpenReply**. It 
 
 ## Before connecting
 
-- Deploy your OpenReply web app and always-on worker. Configure PostgreSQL, Redis, email sign-in, and the shared environment variables in [setup.md](setup.md#environment-variables).
-- Use the same `ENCRYPTION_KEY` on the web app and worker. Provider credentials are encrypted at rest.
+- Deploy your OpenReply web app with Vercel Queues. Configure PostgreSQL, Redis, email sign-in, and the shared environment variables in [setup.md](setup.md#environment-variables).
+- Preserve the existing `ENCRYPTION_KEY` in the Vercel deployment. Provider credentials are encrypted at rest.
 - Set `NEXTAUTH_URL` to the public HTTPS URL of your deployment. Zernio must be able to reach its webhook endpoint.
 - Have a Zernio account with the access needed for Instagram and Inbox, and an existing Zernio profile to use with the workspace.
 - Use an Instagram Business or Creator account. Instagram’s permissions, messaging windows, rate limits, and platform policies still apply.
@@ -40,9 +40,9 @@ There is one saved Zernio connection and selected profile per workspace. Existin
 
 ## Operations and troubleshooting
 
-Check `/api/health` first. A working webhook does not deliver DMs on its own: the background worker must be healthy and connected to Redis and PostgreSQL. Check DM Logs for delivery failures, `WebhookEvent` for incoming delivery, and `OperationalEvent` for worker errors.
+Check `/api/health` first. A working webhook does not deliver DMs on its own: the Vercel Queue consumer must be delivering messages and able to reach Redis and PostgreSQL. Check DM Logs for delivery failures, `WebhookEvent` for incoming delivery, and `OperationalEvent` for worker errors.
 
-If connection setup fails, check that the API key is unrestricted, read/write, and has Inbox access; that the selected profile belongs to the key’s account; and that your instance is publicly reachable over HTTPS. Keep the web app and worker’s encryption keys identical.
+If connection setup fails, check that the API key is unrestricted, read/write, and has Inbox access; that the selected profile belongs to the key’s account; and that your instance is publicly reachable over HTTPS. Keep the deployment’s encryption key unchanged.
 
 If you change your public deployment URL, update `NEXTAUTH_URL` on both processes and reconfigure the Zernio connection so its webhook targets the new URL. Check delivery again before relying on campaigns.
 
@@ -54,4 +54,4 @@ Sponsorship appears only in OpenReply’s project and interface surfaces. OpenRe
 
 If Zernio times out or returns an ambiguous send response, OpenReply marks the delivery unconfirmed and avoids automatically sending it again. Inspect the Instagram inbox before retrying manually. Public replies and private DMs track their outcomes independently. Durable postback receipts distinguish a replayed event from a new button tap, including after queue history expires; these receipts also survive a worker restart during delivery.
 
-Deploy the database migrations (`npm run db:migrate`) before starting the updated web app and worker. The integration adds provider/connection storage, independent delivery-uncertainty flags, and durable postback receipts. Existing Instagram accounts default to the direct Meta provider.
+Deploy the database migrations (`npm run db:migrate`) before deploying the updated web app. The integration adds provider/connection storage, independent delivery-uncertainty flags, and durable postback receipts. Existing Instagram accounts default to the direct Meta provider.

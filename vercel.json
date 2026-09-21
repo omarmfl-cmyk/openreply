@@ -11,6 +11,23 @@
     {
       "path": "/api/cron/snapshot-followers",
       "schedule": "0 7 * * *"
+    },
+    {
+      "path": "/api/cron/reconcile-comments",
+      "schedule": "0 8 * * *"
     }
-  ]
+  ],
+  "functions": {
+    "app/api/queues/dm-processing/route.ts": {
+      "experimentalTriggers": [
+        {
+          "type": "queue/v2beta",
+          "topic": "dm-processing",
+          "retryAfterSeconds": 300,
+          "maxConcurrency": 5,
+          "maxDeliveries": 3
+        }
+      ]
+    }
+  }
 }

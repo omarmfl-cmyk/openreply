@@ -19,7 +19,7 @@ const {
 } = vi.hoisted(() => ({
   mockPrisma: {
     zernioConnection: { findUnique: vi.fn() },
-    postbackDelivery: { create: vi.fn(), delete: vi.fn() },
+    postbackDelivery: { create: vi.fn(), delete: vi.fn(), findUnique: vi.fn(), upsert: vi.fn() },
     automation: {
       findMany: vi.fn(),
       findFirst: vi.fn(),
@@ -111,32 +111,17 @@ vi.mock("@/lib/ops/worker-health", () => ({
 }));
 
 vi.mock("@/lib/queue/client", () => ({
-  getDMQueue: () => ({
-    add: mockQueueAdd,
-  }),
+  sendDmJob: mockQueueAdd,
   getRedisConnection: vi.fn(),
   POSTBACK_JOB_NAME: "process-postback",
   FOLLOWUP_JOB_NAME: "process-followup",
   MESSAGE_JOB_NAME: "process-message",
 }));
 
-vi.mock("bullmq", () => {
-  function MockWorker(_name: string, processor: unknown) {
-    (global as Record<string, unknown>).__dmWorkerProcessor = processor;
-    return {
-      on: vi.fn(),
-      close: vi.fn(),
-    };
-  }
-  return {
-    Worker: MockWorker,
-    UnrecoverableError: class UnrecoverableError extends Error {
-      name = "UnrecoverableError";
-    },
-  };
-});
-
-import { createDMWorker } from "../lib/queue/dm-worker";
+vi.mock("@/lib/queue/reconciliation", () => ({ processReconciliation: vi.fn() }));
+import { MetaApiError } from "@/lib/meta/client";
+import { processDmQueueJob } from "../lib/queue/dm-worker";
+import type { DmQueueMessage } from "../lib/queue/client";
 
 const usagePeriodStart = new Date("2026-05-01T00:00:00.000Z");
 
@@ -184,13 +169,8 @@ function getProcessor(): (job: {
   id: string;
   attemptsMade: number;
 }) => Promise<void> {
-  createDMWorker();
-  return (global as Record<string, unknown>).__dmWorkerProcessor as (job: {
-    name?: string;
-    data: typeof mockJobData | Record<string, unknown>;
-    id: string;
-    attemptsMade: number;
-  }) => Promise<void>;
+  return (job) => processDmQueueJob({ type: job.name ?? "process-comment", data: job.data, jobId: job.id } as DmQueueMessage,
+    { messageId: job.id, deliveryCount: job.attemptsMade + 1 });
 }
 
 function createMockJob(data: Record<string, unknown> = mockJobData) {
@@ -218,6 +198,9 @@ function createMockPostbackJob(
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockQueueAdd.mockReset().mockResolvedValue({ messageId: "queued" });
+  mockPrisma.postbackDelivery.findUnique.mockReset().mockResolvedValue(null);
+  mockPrisma.postbackDelivery.upsert.mockReset().mockResolvedValue({});
   mockPrisma.postbackDelivery.create.mockReset().mockResolvedValue({});
   mockPrisma.postbackDelivery.delete.mockReset().mockResolvedValue({});
 
@@ -452,8 +435,8 @@ describe("DM Worker — Full Pipeline", () => {
         requeueAttempt: 1,
       }),
       expect.objectContaining({
-        delay: 1800000,
-        jobId: "comment_ig_456_comment_555_retry_1",
+        delaySeconds: 1800,
+        idempotencyKey: "comment_ig_456_comment_555_retry_1",
       })
     );
   });
@@ -485,7 +468,7 @@ describe("DM Worker — Full Pipeline", () => {
   });
 
   it("should log FAILED, release usage, and re-throw when private reply sending fails", async () => {
-    const error = new Error("API Error");
+    const error = new MetaApiError(10, undefined, undefined, "API Error");
     mockSendPrivateReply.mockRejectedValue(error);
 
     const processor = getProcessor();
@@ -504,7 +487,7 @@ describe("DM Worker — Full Pipeline", () => {
       },
       data: expect.objectContaining({
         status: "FAILED",
-        errorMessage: "API Error",
+        errorMessage: "MetaApiError 10: API Error",
       }),
     });
   });
@@ -815,7 +798,7 @@ describe("DM Worker — Full Pipeline", () => {
       trackedLinks: [],
     });
     mockSendDirectMessage.mockRejectedValue(
-      new Error("This message is sent outside of allowed window.")
+      new MetaApiError(10, undefined, undefined, "This message is sent outside of allowed window.")
     );
 
     const processor = getProcessor();
@@ -842,7 +825,7 @@ describe("DM Worker — Full Pipeline", () => {
       ...mockAutomation,
       trackedLinks: [],
     });
-    mockSendDirectMessage.mockRejectedValue(new Error("boom"));
+    mockSendDirectMessage.mockRejectedValue(new MetaApiError(10, undefined, undefined, "boom"));
 
     const processor = getProcessor();
     await expect(
@@ -901,7 +884,7 @@ describe("DM Worker — one private reply per comment", () => {
       },
     ]);
     mockSendPrivateReplyWithLinkButton.mockRejectedValue(
-      new Error("The comment is invalid for a private reply")
+      new MetaApiError(10, undefined, undefined, "The comment is invalid for a private reply")
     );
 
     const processor = getProcessor();
@@ -920,7 +903,7 @@ describe("DM Worker — one private reply per comment", () => {
       expect.objectContaining({
         data: expect.objectContaining({
           status: "FAILED",
-          errorMessage: "The comment is invalid for a private reply",
+          errorMessage: "MetaApiError 10: The comment is invalid for a private reply",
         }),
       })
     );
@@ -1125,7 +1108,7 @@ describe("DM Worker — DM keyword trigger", () => {
   });
 
   it("should release the usage reservation and rethrow when the send fails", async () => {
-    mockSendDirectMessage.mockRejectedValue(new Error("Meta is down"));
+    mockSendDirectMessage.mockRejectedValue(new MetaApiError(10, undefined, undefined, "Meta is down"));
 
     const processor = getProcessor();
     await expect(processor(createMockMessageJob())).rejects.toThrow(
@@ -1198,7 +1181,7 @@ describe("Zernio worker routing", () => {
   });
 });
 
-it("stops BullMQ retries after an ambiguous Zernio direct-message outcome", async () => {
+it("stops queue retries after an ambiguous Zernio direct-message outcome", async () => {
   mockPrisma.zernioConnection.findUnique.mockResolvedValue({
     apiKey: "encrypted",
   });
@@ -1217,7 +1200,7 @@ it("stops BullMQ retries after an ambiguous Zernio direct-message outcome", asyn
   try {
     await expect(getProcessor()(createMockPostbackJob())).rejects.toMatchObject(
       {
-        name: "UnrecoverableError",
+        name: "UnrecoverableDmError",
         message: expect.stringContaining("Inspect the Instagram inbox"),
       }
     );
@@ -1302,7 +1285,7 @@ describe("durable Zernio postback delivery", () => {
     try {
       const process = getProcessor();
       await expect(process(tap("old"))).rejects.toMatchObject({
-        name: "UnrecoverableError",
+        name: "UnrecoverableDmError",
       });
       await process(tap("new"));
       await process({ ...tap("old"), id: "redelivery-job" });
@@ -1399,5 +1382,60 @@ describe("durable Zernio postback delivery", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+});
+
+
+describe("Vercel Queue redelivery safety", () => {
+  function durableClaims() {
+    const claims = new Set<string>();
+    mockPrisma.postbackDelivery.create.mockImplementation(async ({ data }: { data: { id: string } }) => {
+      if (claims.has(data.id)) throw { code: "P2002" };
+      claims.add(data.id);
+      return data;
+    });
+  }
+
+  it("sends a direct Meta follow-up once across message redeliveries", async () => {
+    durableClaims();
+    mockPrisma.automation.findFirst.mockResolvedValue({
+      ...mockAutomation, followUpEnabled: true, followUpMessage: "Thanks!",
+    });
+    const job = {
+      name: "process-followup", id: "followup_a_u", attemptsMade: 0,
+      data: { instagramAccountId: "ig_456", userId: "commenter_999", automationId: "auto_789" },
+    };
+    await getProcessor()(job);
+    await getProcessor()({ ...job, id: "redelivered", attemptsMade: 1 });
+    expect(mockSendDirectMessage).toHaveBeenCalledOnce();
+  });
+
+  it("deduplicates a direct Meta tap but permits a distinct tap", async () => {
+    durableClaims();
+    mockPrisma.automation.findFirst.mockResolvedValue({ ...mockAutomation, trackedLinks: [] });
+    const data = { instagramAccountId: "ig_456", userId: "commenter_999", payload: "reveal:auto_789", mid: "tap1" };
+    await getProcessor()(createMockPostbackJob(data));
+    await getProcessor()({ ...createMockPostbackJob(data), id: "redelivered" });
+    await getProcessor()(createMockPostbackJob({ ...data, mid: "tap2" }));
+    expect(mockSendDirectMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries follow-up publication after a successful Meta reveal without resending it", async () => {
+    durableClaims();
+    mockPrisma.automation.findFirst.mockResolvedValue({
+      ...mockAutomation, trackedLinks: [], followUpEnabled: true,
+      followUpMessage: "Thanks!", followUpDelayMinutes: 10,
+    });
+    mockQueueAdd.mockRejectedValueOnce(new Error("queue unavailable"));
+    const job = createMockPostbackJob();
+    await expect(getProcessor()(job)).rejects.toThrow("queue unavailable");
+    expect(mockPrisma.dmLog.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      update: expect.objectContaining({ status: "SENT" }),
+    }));
+    mockPrisma.dmLog.findUnique.mockResolvedValue({ status: "SENT" });
+    await getProcessor()(job);
+    expect(mockSendDirectMessage).toHaveBeenCalledOnce();
+    expect(mockQueueAdd).toHaveBeenCalledTimes(2);
+    expect(mockQueueAdd.mock.calls[1][2]).toEqual({ delaySeconds: 600, idempotencyKey: "followup_auto_789_commenter_999" });
   });
 });

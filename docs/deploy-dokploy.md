@@ -1,3 +1,5 @@
+> Historical guide: this describes the retired BullMQ architecture. The current push consumer requires Vercel. Do not configure these worker commands; use [Vercel Queues deployment](vercel-queues.md).
+
 # Self-Hosting on Dokploy
 
 This guide covers deploying OpenReply on your own server using [Dokploy](https://dokploy.com), as an alternative to the Vercel + Railway setup covered in `docs/setup.md`. Running everything on your own Dokploy instance means no per-seat hosting fees and no usage caps — but there are a few gotchas specific to this setup worth knowing up front.
