@@ -79,6 +79,8 @@ model Workspace {
   members           WorkspaceMember[]
   invitations       WorkspaceInvitation[]
   instagramAccounts InstagramAccount[]
+  facebookPages     FacebookPage[]
+  facebookCampaigns FacebookCampaign[]
   automations       Automation[]
   dmLogs            DmLog[]
   trackedLinks      TrackedLink[]
@@ -212,6 +214,7 @@ model Automation {
   workspace        Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   instagramAccount InstagramAccount @relation(fields: [instagramAccountId], references: [id], onDelete: Cascade)
   dmLogs           DmLog[]
+  facebookCampaign FacebookCampaign?
   trackedLinks     TrackedLink[]
   linkClicks       LinkClick[]
 
@@ -415,4 +418,86 @@ model ZernioConnection {
 model PostbackDelivery {
   id String @id
   createdAt DateTime @default(now())
+}
+
+model FacebookPage {
+  id                String   @id @default(cuid())
+  workspaceId       String
+  pageId            String   @unique
+  name              String
+  accessToken       String
+  tokenExpiresAt    DateTime?
+  webhookSubscribed Boolean  @default(false)
+  connectedAt       DateTime @default(now())
+  disconnectedAt    DateTime?
+  updatedAt         DateTime @updatedAt
+  workspace         Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  campaigns         FacebookCampaign[]
+  deliveries        FacebookDelivery[]
+  @@index([workspaceId])
+}
+
+model FacebookCampaign {
+  id                 String @id @default(cuid())
+  workspaceId        String
+  facebookPageId     String
+  automationId       String? @unique
+  name               String
+  postId             String?
+  matchAnyPost       Boolean @default(true)
+  keywords           String[]
+  matchAnyWord       Boolean @default(false)
+  wholeWordMatch     Boolean @default(true)
+  privateReplyEnabled Boolean @default(true)
+  privateReplyMessage String
+  publicReplyEnabled Boolean @default(false)
+  publicReplyMessage String?
+  isActive           Boolean @default(true)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  workspace          Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  facebookPage       FacebookPage @relation(fields: [facebookPageId], references: [id], onDelete: Restrict)
+  automation         Automation? @relation(fields: [automationId], references: [id], onDelete: SetNull)
+  deliveries         FacebookDelivery[]
+  @@index([workspaceId])
+  @@index([facebookPageId, isActive])
+}
+
+model FacebookDelivery {
+  id                 String @id @default(cuid())
+  facebookPageId     String
+  campaignId         String
+  commentId          String
+  postId             String
+  commenterId        String
+  commenterName      String?
+  commentText        String
+  matchedKeyword     String?
+  commentCreatedAt   DateTime
+  publicStatus       FacebookReplyStatus @default(PENDING)
+  privateStatus      FacebookReplyStatus @default(PENDING)
+  publicError        String?
+  privateError       String?
+  publicReplyId      String?
+  privateReplyId     String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  facebookPage       FacebookPage @relation(fields: [facebookPageId], references: [id], onDelete: Restrict)
+  campaign           FacebookCampaign @relation(fields: [campaignId], references: [id], onDelete: Restrict)
+  @@unique([facebookPageId, campaignId, commentId])
+  @@index([createdAt])
+}
+
+// Durable one-private-reply claim survives retries and campaign changes.
+model FacebookPrivateClaim {
+  id        String @id
+  createdAt DateTime @default(now())
+}
+
+enum FacebookReplyStatus {
+  PENDING
+  UNCONFIRMED
+  SENT
+  FAILED
+  SKIPPED
 }
