@@ -69,6 +69,7 @@ vi.mock("@/lib/meta/client", () => ({
   sendCommentReply: vi.fn(),
   MetaApiError: class MetaApiError extends Error {
     code: number;
+    subcode: number | undefined;
     constructor(
       code: number,
       _subcode: number | undefined,
@@ -77,6 +78,7 @@ vi.mock("@/lib/meta/client", () => ({
     ) {
       super(message);
       this.code = code;
+      this.subcode = _subcode;
       this.name = "MetaApiError";
     }
   },
@@ -119,6 +121,8 @@ vi.mock("@/lib/queue/client", () => ({
 }));
 
 vi.mock("@/lib/queue/reconciliation", () => ({ processReconciliation: vi.fn() }));
+import { dmQueueRetry, UnrecoverableDmError } from "@/lib/queue/errors";
+import { sendCommentReply, TokenExpiredError, RateLimitError } from "@/lib/meta/client";
 import { MetaApiError } from "@/lib/meta/client";
 import { processDmQueueJob } from "../lib/queue/dm-worker";
 import type { DmQueueMessage } from "../lib/queue/client";
@@ -1438,4 +1442,98 @@ describe("Vercel Queue redelivery safety", () => {
     expect(mockQueueAdd).toHaveBeenCalledTimes(2);
     expect(mockQueueAdd.mock.calls[1][2]).toEqual({ delaySeconds: 600, idempotencyKey: "followup_auto_789_commenter_999" });
   });
+});
+
+
+describe.each([2534001, 2534025])("terminal private reply %s", (subcode) => {
+  const errorMessage = `PermissionError 100: rejected [code=100 sub=${subcode} type=OAuthException]`;
+
+  it.each([true, false])("acknowledges without retry (structured subcode: %s)", async (structured) => {
+    const error = new MetaApiError(100, structured ? subcode : undefined, undefined,
+      structured ? "rejected" : errorMessage);
+    mockSendPrivateReply.mockRejectedValueOnce(error);
+    const failure = await getProcessor()(createMockJob()).catch((error) => error);
+    expect(failure).toBeInstanceOf(UnrecoverableDmError);
+    expect(dmQueueRetry(failure, { deliveryCount: 1 })).toEqual({ acknowledge: true });
+    expect(mockPrisma.dmLog.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ status: "FAILED", errorMessage: expect.stringContaining(String(subcode)) }),
+    }));
+    expect(mockSendPrivateReply).toHaveBeenCalledOnce();
+    expect(mockQueueAdd).not.toHaveBeenCalled();
+  });
+
+  it("does not fall back to another private reply after a terminal button rejection", async () => {
+    mockPrisma.automation.findMany.mockResolvedValue([{ ...mockAutomation,
+      trackedLinks: [{ slug: "link", label: "Open", destinationUrl: "https://example.com" }],
+    }]);
+    mockSendPrivateReplyWithLinkButton.mockRejectedValueOnce(new MetaApiError(100, subcode, undefined, "rejected"));
+    await expect(getProcessor()(createMockJob())).rejects.toBeInstanceOf(UnrecoverableDmError);
+    expect(mockSendPrivateReply).not.toHaveBeenCalled();
+  });
+
+  it("keeps a terminal text fallback failure instead of retrying the original template error", async () => {
+    mockPrisma.automation.findMany.mockResolvedValue([{ ...mockAutomation,
+      trackedLinks: [{ slug: "link", label: "Open", destinationUrl: "https://example.com" }],
+    }]);
+    mockSendPrivateReplyWithLinkButton.mockRejectedValueOnce(new MetaApiError(100, undefined, undefined, "bad template"));
+    mockSendPrivateReply.mockRejectedValueOnce(new MetaApiError(100, subcode, undefined, "rejected"));
+    const failure = await getProcessor()(createMockJob()).catch((error) => error);
+    expect(failure).toBeInstanceOf(UnrecoverableDmError);
+    expect(dmQueueRetry(failure, { deliveryCount: 1 })).toEqual({ acknowledge: true });
+    expect(mockPrisma.dmLog.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ errorMessage: expect.stringContaining(String(subcode)) }),
+    }));
+  });
+
+  it("keeps the DM terminal when a public reply retry fails", async () => {
+    mockPrisma.automation.findMany.mockResolvedValue([{ ...mockAutomation, publicReplyEnabled: true, publicReplyMessage: "Thanks!" }]);
+    mockPrisma.dmLog.findUnique.mockResolvedValue({ status: "FAILED", errorMessage });
+    vi.mocked(sendCommentReply).mockRejectedValueOnce(new RateLimitError("rate limited"));
+    await getProcessor()(createMockJob());
+    await getProcessor()(createMockJob());
+    expect(sendCommentReply).toHaveBeenCalledTimes(2);
+    expect(mockSendPrivateReply).not.toHaveBeenCalled();
+    for (const [call] of mockPrisma.dmLog.update.mock.calls) {
+      expect(call.data).not.toHaveProperty("errorMessage");
+      expect(call.data).not.toHaveProperty("status");
+    }
+  });
+
+  it.each([false, true])("skips legacy terminal DM; retries only missing public reply (%s)", async (publicReplyEnabled) => {
+    mockPrisma.automation.findMany.mockResolvedValue([{ ...mockAutomation, publicReplyEnabled, publicReplyMessage: "Thanks!" }]);
+    mockPrisma.dmLog.findUnique.mockResolvedValue({ status: "FAILED", errorMessage });
+    await getProcessor()(createMockJob());
+    await getProcessor()(createMockJob());
+    expect(sendCommentReply).toHaveBeenCalledTimes(publicReplyEnabled ? 2 : 0);
+    expect(mockSendPrivateReply).not.toHaveBeenCalled();
+    expect(mockReserveWorkspaceDMSend).not.toHaveBeenCalled();
+    for (const [call] of mockPrisma.dmLog.update.mock.calls) {
+      expect(call.data).not.toHaveProperty("status");
+      expect(call.data).not.toHaveProperty("errorMessage");
+    }
+  });
+
+  it("preserves terminal history when public retry cannot decrypt credentials", async () => {
+    mockPrisma.automation.findMany.mockResolvedValue([{ ...mockAutomation, publicReplyEnabled: true, publicReplyMessage: "Thanks!" }]);
+    mockPrisma.dmLog.findUnique.mockResolvedValue({ status: "FAILED", errorMessage });
+    mockDecryptToken.mockImplementationOnce(() => { throw new Error("bad token"); });
+    await getProcessor()(createMockJob());
+    expect(mockPrisma.dmLog.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      update: { publicReplyError: "Failed to decrypt Instagram access token" },
+    }));
+    expect(mockSendPrivateReply).not.toHaveBeenCalled();
+  });
+});
+
+it.each([
+  new MetaApiError(2, undefined, undefined, "temporary outage"),
+  new MetaApiError(100, 999, undefined, "other rejection"),
+  new RateLimitError("rate limited"),
+  new TokenExpiredError("expired token"),
+])("preserves retries for %s", async (error) => {
+  mockPrisma.dmLog.findUnique.mockResolvedValue({ status: "FAILED", errorMessage: "temporary outage" });
+  mockSendPrivateReply.mockRejectedValueOnce(error);
+  const failure = await getProcessor()(createMockJob()).catch((error) => error);
+  expect(failure).toBe(error);
+  expect(dmQueueRetry(failure, { deliveryCount: 1 })).toEqual({ afterSeconds: 300 });
 });
