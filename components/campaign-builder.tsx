@@ -19,6 +19,8 @@ import AccountSelect, { type AccountOption } from "@/components/account-select";
 import PostPicker from "@/components/post-picker";
 import CampaignPreview, { type PreviewTab } from "@/components/campaign-preview";
 import { readCache, writeCache } from "@/lib/client-cache";
+import { FacebookFields, FacebookCampaignEditor, emptyFacebookCampaign, type FacebookCampaignRecord } from "@/components/facebook-campaign";
+import type { FacebookCampaignInput } from "@/lib/facebook/campaigns";
 import {
   IMPORT_QUEUE_KEY,
   IMPORT_ACCOUNT_KEY,
@@ -29,6 +31,7 @@ type TriggerScope = "specific" | "any" | "next";
 type MatchMode = "specific" | "any";
 
 interface LoadedCampaign {
+  facebookCampaign?: FacebookCampaignRecord | null;
   id: string;
   name: string;
   postId: string | null;
@@ -133,6 +136,13 @@ function Toggle({
 export default function CampaignBuilder({ mode, campaignId }: CampaignBuilderProps) {
   const { t } = useI18n();
   const router = useRouter();
+  const [facebookAvailable, setFacebookAvailable] = useState(false);
+  const [platform, setPlatform] = useState("Instagram");
+  const [facebook, setFacebook] = useState<FacebookCampaignInput>(emptyFacebookCampaign);
+  const [facebookCampaignId, setFacebookCampaignId] = useState<string>();
+  useEffect(() => {
+    fetch('/api/facebook/pages').then(r => r.json()).then(d => setFacebookAvailable(!!d.enabled)).catch(() => {});
+  }, []);
 
   const [loading, setLoading] = useState(mode === "edit");
   const [notFound, setNotFound] = useState(false);
@@ -252,6 +262,11 @@ export default function CampaignBuilder({ mode, campaignId }: CampaignBuilderPro
         const c = (payload.data as LoadedCampaign[]).find((x) => x.id === campaignId);
         if (!c) return setNotFound(true);
         setName(c.name);
+        if (c.facebookCampaign) {
+          setPlatform("Both");
+          setFacebook(c.facebookCampaign);
+          setFacebookCampaignId(c.facebookCampaign.id);
+        }
         setSelectedAccountId(c.instagramAccountId);
         setTriggerScope(
           c.matchAnyPost ? "any" : c.pendingNextReel ? "next" : "specific"
@@ -400,6 +415,7 @@ export default function CampaignBuilder({ mode, campaignId }: CampaignBuilderPro
     setSaving(true);
 
     const payload = {
+      ...(platform === "Both" ? { facebook: { ...facebook, isActive: activeValue && facebook.isActive } } : facebookCampaignId ? { facebook: null } : {}),
       name: name.trim() || `Campaign for @${username}`,
       instagramAccountId: selectedAccountId,
       postId: triggerScope === "specific" ? postId : null,
@@ -552,8 +568,17 @@ export default function CampaignBuilder({ mode, campaignId }: CampaignBuilderPro
     );
   }
 
+  const platformPicker = facebookAvailable && <label className="block max-w-sm text-sm font-semibold">Platform
+    <select value={platform} onChange={e => setPlatform(e.target.value)} className="block w-full rounded border border-border bg-surface p-2 mt-1">
+      <option>Instagram</option><option>Facebook</option><option>Both</option>
+    </select>
+  </label>;
+  if (platform === "Facebook") return <div className="space-y-4">{platformPicker}<FacebookCampaignEditor campaignId={facebookCampaignId} initial={facebook} replaceAutomationId={mode === 'edit' ? campaignId : undefined} /></div>;
+
   return (
     <div className="space-y-6">
+      {platformPicker}
+      {platform === "Both" && <div className="max-w-2xl space-y-2"><p className="text-sm text-muted">Both platforms have independent posts, keywords and messages. Save below to save both together.</p><FacebookFields key={facebookCampaignId ?? 'new'} value={facebook} onChange={setFacebook} /></div>}
       {importQueue && (
         <div className="rounded border border-accent/30 bg-accent/5 px-4 py-3 text-sm">
           <span className="font-medium text-foreground">

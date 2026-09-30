@@ -10,6 +10,7 @@ import { useI18n } from "@/lib/i18n/provider";
 import { useEffect, useState, useCallback } from "react";
 import AccountSelect, { type AccountOption } from "@/components/account-select";
 import StatusBadge from "@/components/status-badge";
+import { FacebookLogs } from "@/components/facebook-logs";
 
 interface DmLog {
   id: string;
@@ -101,6 +102,7 @@ export default function LogsPage() {
 
   return (
     <div className="space-y-6">
+      <FacebookLogs />
       {/* Filters */}
       <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
         <div className="flex flex-wrap gap-2">

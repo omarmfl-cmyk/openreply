@@ -12,6 +12,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import AccountSelect, { type AccountOption } from "@/components/account-select";
 import { readCache, writeCache } from "@/lib/client-cache";
+import { FacebookCampaignList } from "@/components/facebook-campaign-list";
 
 interface Campaign {
   id: string;
@@ -280,6 +281,7 @@ export default function CampaignsPage() {
 
   return (
     <div className="space-y-6">
+      <FacebookCampaignList />
       {/* Header */}
       <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>

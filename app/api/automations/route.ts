@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
+import { facebookEnabled } from "@/lib/facebook/config";
+import { facebookCampaignSchema } from "@/lib/facebook/campaigns";
 import { getCurrentWorkspaceId } from "@/lib/auth";
 import { prisma } from "@/lib/db/client";
 import { calculateCtr, normalizeTopKeywords } from "@/lib/tracking/analytics";
@@ -18,6 +20,20 @@ import {
 // This list is read-your-writes (created/imported campaigns must show up
 // immediately), so never cache it at the route or CDN layer.
 export const dynamic = "force-dynamic";
+
+async function validateFacebookCompanion(request: NextRequest, body: Record<string, unknown>, workspaceId: string) {
+  if (body.facebook === undefined || body.facebook === null) return { data: null };
+  if (!facebookEnabled() || request.headers.get("origin") !== request.nextUrl.origin) {
+    return { error: NextResponse.json({ error: "Facebook is disabled or request origin is invalid" }, { status: 403 }) };
+  }
+  const parsed = facebookCampaignSchema.safeParse(body.facebook);
+  if (!parsed.success) return { error: NextResponse.json({ error: parsed.error.issues[0].message }, { status: 400 }) };
+  const page = await prisma.facebookPage.findFirst({ where: { id: parsed.data.facebookPageId, workspaceId, disconnectedAt: null } });
+  if (!page || (parsed.data.postId && !parsed.data.postId.startsWith(`${page.pageId}_`))) {
+    return { error: NextResponse.json({ error: "Facebook Page/post does not belong to this workspace" }, { status: 400 }) };
+  }
+  return { data: { ...parsed.data, postId: parsed.data.matchAnyPost ? null : parsed.data.postId, workspaceId } };
+}
 
 const createAutomationSchema = z
   .object({
@@ -143,6 +159,7 @@ export async function GET(request: NextRequest) {
   const automations = await prisma.automation.findMany({
     where: { workspaceId, ...accountFilter },
     include: {
+      ...(facebookEnabled() ? { facebookCampaign: true } : {}),
       instagramAccount: {
         select: { username: true, instagramId: true },
       },
@@ -311,6 +328,9 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  const facebook = await validateFacebookCompanion(request, body, workspaceId);
+  if (facebook.error) return facebook.error;
+
   const requestedInstagramAccountId =
     parsed.data.instagramAccountId && parsed.data.instagramAccountId !== "all"
       ? parsed.data.instagramAccountId
@@ -413,6 +433,7 @@ export async function POST(request: NextRequest) {
       workspaceId,
       instagramAccountId: instagramAccount.id,
       reportShareSlug: generateReportShareSlug(),
+      ...(facebook.data ? { facebookCampaign: { create: facebook.data } } : {}),
       ...(linkCreates.length > 0
         ? { trackedLinks: { create: linkCreates } }
         : {}),
@@ -479,6 +500,12 @@ export async function PATCH(request: NextRequest) {
     );
   }
 
+  const facebook = await validateFacebookCompanion(request, body, workspaceId);
+  if (facebook.error) return facebook.error;
+  if (body.facebook === null && (!facebookEnabled() || request.headers.get("origin") !== request.nextUrl.origin)) {
+    return NextResponse.json({ error: "Facebook is disabled or request origin is invalid" }, { status: 403 });
+  }
+
   const {
     trackedDestinationUrl,
     secondaryDestinationUrl,
@@ -527,6 +554,16 @@ export async function PATCH(request: NextRequest) {
       where: { id: automationId },
       data: automationData,
     });
+
+    if (facebook.data) {
+      await tx.facebookCampaign.upsert({ where: { automationId },
+        create: { ...facebook.data, automationId }, update: facebook.data });
+    } else if (body.facebook === null) {
+      // Keep Facebook history; removing Both pauses/detaches only its companion.
+      await tx.facebookCampaign.updateMany({ where: { automationId, workspaceId }, data: { automationId: null, isActive: false } });
+    } else if (facebookEnabled() && parsed.data.isActive !== undefined) {
+      await tx.facebookCampaign.updateMany({ where: { automationId, workspaceId }, data: { isActive: parsed.data.isActive } });
+    }
 
     await syncCampaignLinks(tx, {
       workspaceId,
@@ -579,7 +616,14 @@ export async function DELETE(request: NextRequest) {
     );
   }
 
-  await prisma.automation.delete({ where: { id: automationId } });
+  if (facebookEnabled()) {
+    await prisma.$transaction(async tx => {
+      await tx.facebookCampaign.updateMany({ where: { automationId, workspaceId }, data: { isActive: false } });
+      await tx.automation.delete({ where: { id: automationId } });
+    });
+  } else {
+    await prisma.automation.delete({ where: { id: automationId } });
+  }
 
   return NextResponse.json({ success: true, data: { deleted: true } });
 }
