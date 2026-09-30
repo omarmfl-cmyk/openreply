@@ -26,6 +26,7 @@
  */
 
 import { prisma } from "@/lib/db/client";
+import { isTerminalPrivateReplyLog } from "@/lib/instagram/private-reply-errors";
 import { sendDmJob } from "@/lib/queue/client";
 import {
   getRecentMediaComments,
@@ -235,18 +236,22 @@ async function sweepCampaign({
     // enough — the reply still has to land); otherwise a SENT DM is enough. This
     // is what lets a comment whose DM sent but whose public reply failed come
     // back and retry the reply.
-    const handled = await prisma.dmLog.findMany({
+    const logs = await prisma.dmLog.findMany({
       where: {
         automationId: automation.id,
         commentId: { in: needsAction.map((c) => c.id) },
-        AND: [
-          { OR: [{ status: "SENT" }, { dmDeliveryUnconfirmed: true }] },
-          ...(automation.publicReplyEnabled ? [{ OR: [{ publicReplySentAt: { not: null } }, { publicReplyDeliveryUnconfirmed: true }] }] : []),
-        ],
       },
-      select: { commentId: true },
+      select: {
+        commentId: true, status: true, errorMessage: true,
+        dmDeliveryUnconfirmed: true, publicReplySentAt: true,
+        publicReplyDeliveryUnconfirmed: true,
+      },
     });
-    const handledSet = new Set(handled.map((h) => h.commentId));
+    // Legacy FAILED rows need no migration. Missing public replies remain eligible.
+    const handledSet = new Set(logs.filter((log) =>
+      (log.status === "SENT" || log.dmDeliveryUnconfirmed || isTerminalPrivateReplyLog(log)) &&
+      (!automation.publicReplyEnabled || log.publicReplySentAt || log.publicReplyDeliveryUnconfirmed)
+    ).map((log) => log.commentId));
 
     // Oldest first, so whoever commented earliest gets answered first, capped.
     const fresh = needsAction

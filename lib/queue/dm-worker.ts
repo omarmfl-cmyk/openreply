@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isTerminalPrivateReplyError, isTerminalPrivateReplyLog } from "@/lib/instagram/private-reply-errors";
 import { UnrecoverableDmError } from "./errors";
 import type { DmQueueMessage } from "./client";
 import { processReconciliation } from "./reconciliation";
@@ -56,7 +57,7 @@ type Job<T> = { data: T; name: string; id: string; attemptsMade: number };
 
 function formatError(error: unknown): string {
   if (error instanceof MetaApiError) {
-    return `${error.name} ${error.code}: ${error.message}`;
+    return `${error.name} ${error.code}: ${error.message}${error.subcode === undefined ? "" : ` [code=${error.code} sub=${error.subcode}]`}`;
   }
   if (error instanceof Error) {
     return error.message;
@@ -79,7 +80,8 @@ function isTemplateRejection(error: unknown): boolean {
   if (
     error instanceof TokenExpiredError ||
     error instanceof RateLimitError ||
-    error instanceof ZernioApiError
+    error instanceof ZernioApiError ||
+    isTerminalPrivateReplyError(error)
   ) {
     return false;
   }
@@ -287,7 +289,8 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
 
     const alreadyDmd = existingLog?.status === "SENT";
     const alreadyPublicReplied = Boolean(existingLog?.publicReplySentAt);
-    const needsDm = !alreadyDmd && !existingLog?.dmDeliveryUnconfirmed;
+    const terminalDm = isTerminalPrivateReplyLog(existingLog);
+    const needsDm = !alreadyDmd && !existingLog?.dmDeliveryUnconfirmed && !terminalDm;
 
     // Skip only when there is genuinely nothing left to do. A comment whose DM
     // already sent but whose public reply never posted (e.g. it hit a rate
@@ -320,7 +323,9 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           status: "FAILED",
           errorMessage: "No Instagram access token available",
         },
-        update: {
+        update: terminalDm ? {
+          publicReplyError: "No Instagram access token available",
+        } : {
           status: "FAILED",
           errorMessage: "No Instagram access token available",
         },
@@ -354,7 +359,9 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           status: "FAILED",
           errorMessage: "Failed to decrypt Instagram access token",
         },
-        update: {
+        update: terminalDm ? {
+          publicReplyError: "Failed to decrypt Instagram access token",
+        } : {
           status: "FAILED",
           errorMessage: "Failed to decrypt Instagram access token",
         },
@@ -687,7 +694,8 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
                   message: fallbackMessage,
                   postId: mediaId,
                 });
-              } catch {
+              } catch (fallbackError) {
+                if (isTerminalPrivateReplyError(fallbackError)) throw fallbackError;
                 // The first attempt consumed the comment's single private reply, so
                 // this one reports "invalid for a private reply" no matter what the
                 // underlying problem was. Surface the original rejection instead.
@@ -1394,7 +1402,8 @@ export async function processDmQueueJob(data: DmQueueMessage, metadata: {
     await dispatchJob(job);
   } catch (error) {
     await recordWorkerFailure(job, error instanceof Error ? error : new Error(String(error)));
-    if (error instanceof ZernioDeliveryUnconfirmedError)
+    if (error instanceof ZernioDeliveryUnconfirmedError ||
+      (data.type === "process-comment" && isTerminalPrivateReplyError(error)))
       throw new UnrecoverableDmError(error.message);
     throw error;
   }
