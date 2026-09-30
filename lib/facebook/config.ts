@@ -9,6 +9,7 @@ export function requireFacebook() {
 }
 
 export const FACEBOOK_PERMISSIONS = [
+  'business_management',
   'pages_show_list', 'pages_manage_metadata', 'pages_read_engagement',
   'pages_read_user_content', 'pages_manage_engagement', 'pages_messaging',
 ];

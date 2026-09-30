@@ -48,6 +48,7 @@ it('connect uses separate credentials, verified permissions, callback and HttpOn
   expect(url.origin).toBe('https://www.facebook.com'); expect(url.searchParams.get('client_id')).toBe('123');
   expect(url.searchParams.get('redirect_uri')).toBe('https://staging.test/api/facebook/callback');
   expect(url.searchParams.get('scope')?.split(',')).toEqual(FACEBOOK_PERMISSIONS);
+  expect(url.searchParams.get('scope')?.split(',')).toContain('business_management');
   if (!(result instanceof NextResponse)) throw new Error('Expected OAuth redirect');
   const cookie = result.cookies.get(FACEBOOK_COOKIE)!;
   expect(cookie.httpOnly).toBe(true); expect(cookie.path).toBe('/api/facebook');
