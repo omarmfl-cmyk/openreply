@@ -61,9 +61,9 @@ export function FacebookCampaignEditor({ campaignId, initial = emptyFacebookCamp
       setValue(row);
       setAutomationId(row.automationId ?? '');
       setOriginalAutomationId(row.automationId ?? '');
-      setPlatform(row.automationId ? 'Both' : 'Facebook');
+      setPlatform(row.automationId && !replaceAutomationId ? 'Both' : 'Facebook');
     }).catch(e => setError(e.message)).finally(() => setLoading(false));
-  }, [campaignId]);
+  }, [campaignId, replaceAutomationId]);
   useEffect(() => {
     if (!campaignId) return;
     fetch('/api/automations', { cache: 'no-store' }).then(r => r.json()).then(d => {
