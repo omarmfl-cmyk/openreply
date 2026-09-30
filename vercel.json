@@ -18,6 +18,9 @@
     }
   ],
   "functions": {
+    "app/api/queues/facebook-comments/route.ts": {
+      "experimentalTriggers": [{ "type": "queue/v2beta", "topic": "facebook-comments", "retryAfterSeconds": 300, "maxConcurrency": 5, "maxDeliveries": 3 }]
+    },
     "app/api/queues/dm-processing/route.ts": {
       "experimentalTriggers": [
         {
