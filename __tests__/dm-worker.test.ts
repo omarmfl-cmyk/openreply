@@ -217,8 +217,8 @@ beforeEach(() => {
   // latter should resolve by default, or every comment would look like a
   // duplicate of an already-answered one.
   mockPrisma.dmLog.findFirst.mockImplementation(
-    async (args: { where?: { status?: string } } = {}) =>
-      args.where?.status === "SENT" ? null : { commenterName: "commenter_user" }
+    async (args: { where?: { status?: string; dmSentAt?: unknown } } = {}) =>
+      args.where?.status === "SENT" || args.where?.dmSentAt ? null : { commenterName: "commenter_user" }
   );
   mockPrisma.dmLog.upsert.mockResolvedValue({});
   mockPrisma.dmLog.update.mockResolvedValue({});
@@ -1536,4 +1536,128 @@ it.each([
   const failure = await getProcessor()(createMockJob()).catch((error) => error);
   expect(failure).toBe(error);
   expect(dmQueueRetry(failure, { deliveryCount: 1 })).toEqual({ afterSeconds: 300 });
+});
+
+describe("opening DM per commenter", () => {
+  let claims: Set<string>;
+  const openingAutomation = {
+    ...mockAutomation,
+    openingDmEnabled: true,
+    openingDmMessage: "Welcome!",
+    openingDmButtonLabel: "Get link",
+    publicReplyEnabled: true,
+    publicReplyMessage: "Check your inbox",
+  };
+  const comment = (commentId: string, commenterId = mockJobData.commenterId) =>
+    createMockJob({ ...mockJobData, commentId, commenterId });
+
+  beforeEach(() => {
+    claims = new Set();
+    mockPrisma.automation.findMany.mockResolvedValue([openingAutomation]);
+    mockSendPrivateReplyWithButton.mockReset().mockResolvedValue({});
+    mockPrisma.postbackDelivery.create.mockImplementation(async ({ data }: { data: { id: string } }) => {
+      if (claims.has(data.id)) throw { code: "P2002" };
+      claims.add(data.id);
+      return data;
+    });
+    mockPrisma.postbackDelivery.findUnique.mockImplementation(async ({ where }: { where: { id: string } }) =>
+      claims.has(where.id) ? { id: where.id } : null);
+    mockPrisma.postbackDelivery.delete.mockImplementation(async ({ where }: { where: { id: string } }) => {
+      claims.delete(where.id);
+    });
+  });
+
+  it("sends one opener across different matching comments but replies publicly to each", async () => {
+    for (const [i, commentText] of ["Blé", "ble", "???"].entries()) {
+      await getProcessor()(createMockJob({ ...mockJobData, commentId: `comment_${i}`, commentText }));
+    }
+    expect(mockSendPrivateReplyWithButton).toHaveBeenCalledTimes(1);
+    expect(sendCommentReply).toHaveBeenCalledTimes(3);
+    expect(mockReserveWorkspaceDMSend).toHaveBeenCalledTimes(1);
+    expect(mockReserveDMSlot).toHaveBeenCalledTimes(1);
+    expect(mockPrisma.dmLog.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { automationId_commentId: { automationId: mockAutomation.id, commentId: "comment_2" } },
+      data: expect.objectContaining({ status: "SKIPPED_DEDUP", errorMessage: expect.stringContaining("commenter") }),
+    }));
+  });
+
+  it("allows different commenters", async () => {
+    await getProcessor()(comment("one", "alice"));
+    await getProcessor()(comment("two", "bob"));
+    expect(mockSendPrivateReplyWithButton).toHaveBeenCalledTimes(2);
+  });
+
+  it("allows the same commenter on different automations", async () => {
+    await getProcessor()(comment("one"));
+    mockPrisma.automation.findMany.mockResolvedValue([{ ...openingAutomation, id: "other_automation" }]);
+    await getProcessor()(comment("two"));
+    expect(mockSendPrivateReplyWithButton).toHaveBeenCalledTimes(2);
+  });
+
+  it("honors legacy dmSentAt regardless of status before reserving quota", async () => {
+    mockPrisma.dmLog.findFirst.mockImplementation(async ({ where }) =>
+      where.dmSentAt ? { id: "legacy", status: "FAILED", dmSentAt: new Date() } : null);
+    await getProcessor()(comment("new_comment"));
+    expect(mockPrisma.dmLog.findFirst).toHaveBeenCalledWith({
+      where: { automationId: mockAutomation.id, commenterId: mockJobData.commenterId, dmSentAt: { not: null } },
+      select: { id: true },
+    });
+    expect(mockSendPrivateReplyWithButton).not.toHaveBeenCalled();
+    expect(mockReserveWorkspaceDMSend).not.toHaveBeenCalled();
+    expect(mockReserveDMSlot).not.toHaveBeenCalled();
+    expect(sendCommentReply).toHaveBeenCalledTimes(1);
+  });
+
+  it("atomically dedupes concurrent comments and releases both loser reservations", async () => {
+    // Force both workers past the advisory read; the unique durable insert must arbitrate.
+    mockPrisma.postbackDelivery.findUnique.mockResolvedValue(null);
+    await Promise.all([getProcessor()(comment("one")), getProcessor()(comment("two"))]);
+    expect(mockSendPrivateReplyWithButton).toHaveBeenCalledTimes(1);
+    expect(sendCommentReply).toHaveBeenCalledTimes(2);
+    expect(mockReserveWorkspaceDMSend).toHaveBeenCalledTimes(2);
+    expect(mockReserveDMSlot).toHaveBeenCalledTimes(2);
+    expect(mockReleaseWorkspaceDMReservation).toHaveBeenCalledExactlyOnceWith(mockAutomation.workspaceId, usagePeriodStart);
+    expect(mockReleaseDMSlot).toHaveBeenCalledExactlyOnceWith(mockJobData.instagramAccountId);
+    expect(mockPrisma.dmLog.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ status: "SKIPPED_DEDUP" }),
+    }));
+    expect(claims.has(`opening:${mockAutomation.id}:${mockJobData.commenterId}`)).toBe(true);
+    await getProcessor()(comment("after_queue_eviction"));
+    expect(mockSendPrivateReplyWithButton).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([400, 500])("releases claims after confirmed Meta error %s for a later valid attempt", async (code) => {
+    mockSendPrivateReplyWithButton.mockRejectedValueOnce(new MetaApiError(code, undefined, undefined, "Meta rejection"));
+    await expect(getProcessor()(comment("one"))).rejects.toThrow();
+    expect(claims.has(`opening:${mockAutomation.id}:${mockJobData.commenterId}`)).toBe(false);
+    expect(claims.has(`private:${mockAutomation.instagramAccountId}:one`)).toBe(false);
+    await getProcessor()(comment("two"));
+    expect(mockSendPrivateReplyWithButton).toHaveBeenCalledTimes(2);
+  });
+
+  it("retains the opening claim on uncertain delivery", async () => {
+    mockSendPrivateReplyWithButton.mockRejectedValueOnce(new Error("connection reset"));
+    await expect(getProcessor()(comment("one"))).rejects.toThrow();
+    await getProcessor()(comment("two"));
+    expect(mockSendPrivateReplyWithButton).toHaveBeenCalledTimes(1);
+    expect(mockPrisma.postbackDelivery.delete).not.toHaveBeenCalled();
+    expect(mockPrisma.dmLog.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ status: "SKIPPED_DEDUP" }),
+    }));
+  });
+
+  it("preserves the existing private-comment durable claim", async () => {
+    claims.add(`private:${mockAutomation.instagramAccountId}:one`);
+    await expect(getProcessor()(comment("one"))).rejects.toThrow();
+    expect(mockSendPrivateReplyWithButton).not.toHaveBeenCalled();
+  });
+
+  it("leaves opening-disabled campaigns sending per comment", async () => {
+    mockPrisma.automation.findMany.mockResolvedValue([mockAutomation]);
+    await getProcessor()(comment("one"));
+    await getProcessor()(comment("two"));
+    expect(mockSendPrivateReply).toHaveBeenCalledTimes(2);
+    expect([...claims].some(id => id.startsWith("opening:"))).toBe(false);
+    expect(mockPrisma.dmLog.findFirst.mock.calls.some(([args]) => args.where.dmSentAt)).toBe(false);
+  });
 });

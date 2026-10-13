@@ -491,6 +491,33 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
       continue;
     }
 
+    const openingOperationId = automation.openingDmEnabled
+      ? `opening:${automation.id}:${commenterId}`
+      : null;
+    const markOpeningDuplicate = () => prisma.dmLog.update({
+      where: {
+        automationId_commentId: { automationId: automation.id, commentId },
+      },
+      data: {
+        status: "SKIPPED_DEDUP",
+        errorMessage: "Opening DM already sent or claimed for this commenter on this automation",
+      },
+    });
+    if (openingOperationId) {
+      // Historical sends predate durable opening claims; status may have changed since delivery.
+      const priorOpening = await prisma.dmLog.findFirst({
+        where: { automationId: automation.id, commenterId, dmSentAt: { not: null } },
+        select: { id: true },
+      });
+      const priorClaim = priorOpening || await prisma.postbackDelivery.findUnique({
+        where: { id: openingOperationId },
+      });
+      if (priorClaim) {
+        await markOpeningDuplicate();
+        continue;
+      }
+    }
+
     const usage = await reserveWorkspaceDMSend(automation.workspaceId);
     if (!usage.allowed) {
       await prisma.dmLog.update({
@@ -613,7 +640,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
     }
 
     try {
-      const delivered = await sendDeliveryOnce({
+      const deliverPrivateReply = () => sendDeliveryOnce({
         operationId: `private:${automation.instagramAccountId}:${commentId}`,
         send: async () => {
           if (useOpeningDm) {
@@ -719,7 +746,18 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
 
         },
       });
-      if (!delivered) throw new ZernioDeliveryUnconfirmedError();
+      const delivered = await sendDeliveryOnce({
+        operationId: openingOperationId,
+        send: async () => {
+          if (!await deliverPrivateReply()) throw new ZernioDeliveryUnconfirmedError();
+        },
+      });
+      if (!delivered) {
+        if (rateLimit.reserved) await releaseDMSlot(instagramAccountId);
+        await releaseWorkspaceDMReservation(automation.workspaceId, usage.periodStart);
+        await markOpeningDuplicate();
+        continue;
+      }
 
       await prisma.dmLog.update({
         where: {
