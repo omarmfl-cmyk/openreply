@@ -1581,6 +1581,60 @@ describe("opening DM per commenter", () => {
     }));
   });
 
+  it("retains both claims and acknowledges an ambiguous Meta opener without resending", async () => {
+    mockSendPrivateReplyWithButton.mockRejectedValueOnce(new MetaApiError(1, undefined, undefined, "An unknown error has occurred."));
+    const failure = await getProcessor()(comment("one")).catch(error => error);
+    expect(failure).toBeInstanceOf(UnrecoverableDmError);
+    expect(dmQueueRetry(failure, { deliveryCount: 1 })).toEqual({ acknowledge: true });
+    expect(mockPrisma.dmLog.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { automationId_commentId: { automationId: mockAutomation.id, commentId: "one" } },
+      data: expect.objectContaining({ status: "FAILED", dmDeliveryUnconfirmed: true }),
+    }));
+    expect(claims.has("private:" + mockAutomation.instagramAccountId + ":one")).toBe(true);
+    expect(claims.has("opening:" + mockAutomation.id + ":" + mockJobData.commenterId)).toBe(true);
+    // Exercise durable deduplication even without the DmLog read guard.
+    await getProcessor()(comment("one"));
+    await getProcessor()(comment("two"));
+    expect(mockSendPrivateReplyWithButton).toHaveBeenCalledOnce();
+    expect(sendCommentReply).toHaveBeenCalledTimes(2);
+    expect(mockPrisma.postbackDelivery.delete).not.toHaveBeenCalled();
+    expect(mockQueueAdd).not.toHaveBeenCalled();
+  });
+
+  it.each(["text", "link button", "text fallback", "follow prompt"])("retains the private claim for ambiguous Meta %s without an opener", async (path) => {
+    mockPrisma.automation.findMany.mockResolvedValue([{ ...mockAutomation,
+      requireFollow: path === "follow prompt",
+      trackedLinks: path === "link button" || path === "text fallback"
+        ? [{ slug: "link", label: "Open", destinationUrl: "https://example.com" }] : [],
+    }]);
+    const error = new MetaApiError(1, undefined, undefined, "An unknown error has occurred.");
+    if (path === "follow prompt") {
+      mockGetUserFollowStatus.mockResolvedValue(false);
+      mockSendPrivateReplyWithButton.mockRejectedValueOnce(error);
+    } else if (path === "link button") {
+      mockSendPrivateReplyWithLinkButton.mockRejectedValueOnce(error);
+    } else {
+      if (path === "text fallback")
+        mockSendPrivateReplyWithLinkButton.mockRejectedValueOnce(new MetaApiError(100, undefined, undefined, "bad template"));
+      mockSendPrivateReply.mockRejectedValueOnce(error);
+    }
+    const failure = await getProcessor()(comment("one")).catch(error => error);
+    expect(failure).toBeInstanceOf(UnrecoverableDmError);
+    expect(dmQueueRetry(failure, { deliveryCount: 1 })).toEqual({ acknowledge: true });
+    expect(mockPrisma.dmLog.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ status: "FAILED", dmDeliveryUnconfirmed: true }),
+    }));
+    expect(claims.has("private:" + mockAutomation.instagramAccountId + ":one")).toBe(true);
+    await expect(getProcessor()(comment("one"))).rejects.toBeInstanceOf(UnrecoverableDmError);
+    mockPrisma.dmLog.findUnique.mockResolvedValue({ status: "FAILED", dmDeliveryUnconfirmed: true });
+    await getProcessor()(comment("one"));
+    expect(mockSendPrivateReply).toHaveBeenCalledTimes(path === "text" || path === "text fallback" ? 1 : 0);
+    expect(mockSendPrivateReplyWithLinkButton).toHaveBeenCalledTimes(path === "link button" || path === "text fallback" ? 1 : 0);
+    expect(mockSendPrivateReplyWithButton).toHaveBeenCalledTimes(path === "follow prompt" ? 1 : 0);
+    expect(mockPrisma.postbackDelivery.delete).not.toHaveBeenCalled();
+    expect(mockQueueAdd).not.toHaveBeenCalled();
+  });
+
   it("allows different commenters", async () => {
     await getProcessor()(comment("one", "alice"));
     await getProcessor()(comment("two", "bob"));
@@ -1660,4 +1714,18 @@ describe("opening DM per commenter", () => {
     expect([...claims].some(id => id.startsWith("opening:"))).toBe(false);
     expect(mockPrisma.dmLog.findFirst.mock.calls.some(([args]) => args.where.dmSentAt)).toBe(false);
   });
+});
+
+it("keeps Meta code 1 unchanged for public replies and direct DM sends", async () => {
+  const provider = await import("@/lib/instagram/provider");
+  const error = new MetaApiError(1, undefined, undefined, "An unknown error has occurred.");
+  const context = { provider: "META" as const, accessToken: "token" };
+  vi.mocked(sendCommentReply).mockRejectedValueOnce(error);
+  mockSendDirectMessage.mockRejectedValueOnce(error);
+  mockSendDirectMessageWithButton.mockRejectedValueOnce(error);
+  mockSendDirectMessageWithLinkButton.mockRejectedValueOnce(error);
+  await expect(provider.sendCommentReply({ context, commentId: "comment", message: "Thanks" })).rejects.toBe(error);
+  await expect(provider.sendDirectMessage({ context, instagramAccountId: "ig", userId: "user", message: "Hello" })).rejects.toBe(error);
+  await expect(provider.sendDirectMessageWithButton({ context, instagramAccountId: "ig", userId: "user", text: "Hello", buttonTitle: "Open", payload: "reveal:auto" })).rejects.toBe(error);
+  await expect(provider.sendDirectMessageWithLinkButton({ context, instagramAccountId: "ig", userId: "user", text: "Hello", buttons: [] })).rejects.toBe(error);
 });
