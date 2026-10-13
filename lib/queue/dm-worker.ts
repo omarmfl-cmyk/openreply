@@ -722,7 +722,10 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
                   postId: mediaId,
                 });
               } catch (fallbackError) {
-                if (isTerminalPrivateReplyError(fallbackError)) throw fallbackError;
+                if (
+                  isTerminalPrivateReplyError(fallbackError) ||
+                  (accessToken.provider === "META" && fallbackError instanceof ZernioDeliveryUnconfirmedError)
+                ) throw fallbackError;
                 // The first attempt consumed the comment's single private reply, so
                 // this one reports "invalid for a private reply" no matter what the
                 // underlying problem was. Surface the original rejection instead.

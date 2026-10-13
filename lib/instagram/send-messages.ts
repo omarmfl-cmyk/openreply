@@ -73,6 +73,13 @@ function linkButtons(buttons: meta.LinkButton[]): Button[] {
     .map(({ title, url }) => ({ type: "url", title: title.slice(0, 20), url }));
 }
 
+function privateReplyFailure(error: unknown): never {
+  // Meta can deliver a comment private reply before returning an unknown error.
+  if (error instanceof meta.MetaApiError && error.code === 1)
+    throw new ZernioDeliveryUnconfirmedError();
+  throw error;
+}
+
 export async function sendPrivateReply({
   context,
   instagramAccountId,
@@ -92,7 +99,7 @@ export async function sendPrivateReply({
       instagramAccountId,
       commentId,
       message
-    );
+    ).catch(privateReplyFailure);
   return sendZernioMessage({ context, commentId, postId, text: message });
 }
 
@@ -121,7 +128,7 @@ export async function sendPrivateReplyWithButton({
       text,
       buttonTitle,
       payload
-    );
+    ).catch(privateReplyFailure);
   return sendZernioMessage({
     context,
     commentId,
@@ -185,7 +192,7 @@ export async function sendPrivateReplyWithLinkButton({
       commentId,
       text,
       buttons
-    );
+    ).catch(privateReplyFailure);
   return sendZernioMessage({
     context,
     commentId,
